@@ -8,23 +8,23 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-#   AYARLAR
+#   SETTINGS
 # ============================================================
 
 WEBHOOK_URL    = "YOUR_DISCORD_WEBHOOK_URL"
 USERNAMES_FILE = "usernames.txt"
 PROXIES_FILE   = "proxies.txt"
 
-# --- Webshare Rotating Residential ayarları ---
-# Webshare aldıysan buraya kullanıcı adı ve şifreni yaz.
-# proxies.txt'i boş bırak, ikisini aynı anda kullanma.
+# --- Rotating proxy settings ---
+# Fill in your proxy credentials below.
+# Leave proxies.txt empty if using rotating proxy — don't use both at the same time.
 WEBSHARE_USER     = ""   # Your proxy username
 WEBSHARE_PASS     = ""   # Your proxy password
-WEBSHARE_ENDPOINT = "p.webshare.io:80"
+WEBSHARE_ENDPOINT = ""   # e.g. p.webshare.io:80
 
-# --- Hız ayarları ---
-THREADS       = 10    # Paralel thread sayısı
-DELAY_SECONDS = 0.3   # Her thread'in istekler arası bekleme süresi
+# --- Speed settings ---
+THREADS       = 10    # Number of parallel threads
+DELAY_SECONDS = 0.3   # Delay between requests per thread
 
 # ============================================================
 
@@ -73,7 +73,7 @@ def load_file(filepath):
 
 
 def random_email():
-    """Her istek için benzersiz sahte email üretir."""
+    """Generates a unique random email for each request."""
     rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=20))
     return f"{rand}@discard.email"
 
@@ -96,7 +96,7 @@ def parse_proxy(proxy_str):
 
 
 def get_rotating_proxy():
-    if not WEBSHARE_USER or not WEBSHARE_PASS:
+    if not WEBSHARE_USER or not WEBSHARE_PASS or not WEBSHARE_ENDPOINT:
         return None
     url = f"http://{WEBSHARE_USER}:{WEBSHARE_PASS}@{WEBSHARE_ENDPOINT}"
     return {"http": url, "https": url}
@@ -113,12 +113,12 @@ def send_webhook(username):
         "content": "@everyone",
         "embeds": [
             {
-                "title": "✅ Müsait Username Bulundu!",
-                "description": f"**`{username}`** Discord'da müsait!",
+                "title": "✅ Available Username Found!",
+                "description": f"**`{username}`** is available on Discord!",
                 "color": 0x00FF7F,
                 "fields": [
                     {"name": "📋 Username", "value": f"`{username}`", "inline": True},
-                    {"name": "🕐 Zaman",    "value": timestamp,       "inline": True},
+                    {"name": "🕐 Time",     "value": timestamp,       "inline": True},
                 ],
                 "footer": {"text": "Discord Username Checker"},
             }
@@ -128,19 +128,19 @@ def send_webhook(username):
         try:
             r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
             if r.status_code not in (200, 204):
-                safe_print(f"{YELLOW}[WEBHOOK] Gönderilemedi: {r.status_code}{RESET}")
+                safe_print(f"{YELLOW}[WEBHOOK] Failed to send: {r.status_code}{RESET}")
         except Exception as e:
-            safe_print(f"{YELLOW}[WEBHOOK] Hata: {e}{RESET}")
+            safe_print(f"{YELLOW}[WEBHOOK] Error: {e}{RESET}")
 
 
 def check_username(username, proxy):
     """
-    Discord kayıt endpoint'i üzerinden username kontrolü.
+    Checks username availability via Discord's register endpoint.
 
-    Mantık:
-      - "USERNAME_ALREADY_TAKEN" hatası → alınmış
-      - Username hatası yok, başka hata (email vb.) → müsait
-      - 429 → rate limit
+    Logic:
+      - "USERNAME_ALREADY_TAKEN" error → taken
+      - No username error, other validation error → available
+      - 429 → rate limited
     """
     retries = 3
     for attempt in range(retries):
@@ -168,12 +168,11 @@ def check_username(username, proxy):
                 codes = [e.get("code") for e in username_errors]
 
                 if "USERNAME_ALREADY_TAKEN" in codes:
-                    return False  # alınmış
+                    return False  # taken
                 else:
-                    return True   # müsait (username hatası yok, başka validasyon hatası)
+                    return True   # available
 
             elif response.status_code == 201:
-                # Gerçekten kayıt oldu? Bu olmamalı ama olursa müsaitti demek
                 return True
 
             elif response.status_code == 429:
@@ -212,10 +211,10 @@ def worker(username, proxy):
 
     result = check_username(username, proxy)
 
-    # Rate limit gelirse bekle ve tekrar dene (aynı thread içinde)
+    # If rate limited, wait and retry in the same thread
     while isinstance(result, tuple) and result[0] == "rate_limited":
         retry_after = result[1]
-        safe_print(f"{YELLOW}[RATE LIMIT] {retry_after}s bekleniyor...{RESET}")
+        safe_print(f"{YELLOW}[RATE LIMIT] Waiting {retry_after}s...{RESET}")
         time.sleep(retry_after)
         result = check_username(username, proxy)
 
@@ -224,20 +223,20 @@ def worker(username, proxy):
         current = checked_count
 
     if result is True:
-        safe_print(f"{GREEN}[MÜSAİT] {username}  ({current}/{total_usernames}){RESET}")
+        safe_print(f"{GREEN}[AVAILABLE] {username}  ({current}/{total_usernames}){RESET}")
         with results_lock:
             available_list.append(username)
         send_webhook(username)
 
     elif result is False:
         if current % 100 == 0:
-            safe_print(f"{GRAY}[{current}/{total_usernames}] kontrol ediliyor...{RESET}")
+            safe_print(f"{GRAY}[{current}/{total_usernames}] checking...{RESET}")
 
     elif result == "proxy_error":
-        safe_print(f"{YELLOW}[PROXY HATA] {username}{RESET}")
+        safe_print(f"{YELLOW}[PROXY ERROR] {username}{RESET}")
 
     else:
-        safe_print(f"{YELLOW}[HATA] {username}{RESET}")
+        safe_print(f"{YELLOW}[ERROR] {username}{RESET}")
 
     time.sleep(DELAY_SECONDS)
 
@@ -253,7 +252,7 @@ def main():
     proxies_raw = load_file(PROXIES_FILE)
 
     if not usernames:
-        print(f"{RED}[HATA] {USERNAMES_FILE} dosyası bulunamadı veya boş!{RESET}")
+        print(f"{RED}[ERROR] {USERNAMES_FILE} not found or empty!{RESET}")
         return
 
     total_usernames = len(usernames)
@@ -261,19 +260,19 @@ def main():
     rotating_proxy = get_rotating_proxy()
     if rotating_proxy:
         proxy_pool = [rotating_proxy] * THREADS
-        print(f"🔄 Mod: Webshare Rotating Residential")
+        print(f"🔄 Mode: Rotating Proxy")
     elif proxies_raw:
         proxy_pool = [p for p in (parse_proxy(x) for x in proxies_raw) if p]
-        print(f"🔄 Mod: Proxy listesi ({len(proxy_pool)} proxy)")
+        print(f"🔄 Mode: Proxy list ({len(proxy_pool)} proxies)")
     else:
         proxy_pool = [None]
-        print(f"🔄 Mod: Proxysiz")
+        print(f"🔄 Mode: No proxy")
 
-    print(f"📋 Kontrol edilecek username : {total_usernames}")
-    print(f"⚡ Thread sayısı             : {THREADS}")
-    print(f"⏱️  Thread başına bekleme    : {DELAY_SECONDS}s")
-    tahmini = (total_usernames / THREADS) * DELAY_SECONDS / 60
-    print(f"🕐 Tahmini süre              : ~{tahmini:.0f} dakika\n")
+    print(f"📋 Usernames to check : {total_usernames}")
+    print(f"⚡ Threads            : {THREADS}")
+    print(f"⏱️  Delay per thread  : {DELAY_SECONDS}s")
+    estimated = (total_usernames / THREADS) * DELAY_SECONDS / 60
+    print(f"🕐 Estimated time     : ~{estimated:.0f} minutes\n")
 
     start_time = time.time()
 
@@ -291,11 +290,11 @@ def main():
     elapsed = (time.time() - start_time) / 60
 
     print(f"\n{CYAN}{'='*55}")
-    print(f"  Tamamlandı! {checked_count} username kontrol edildi.")
-    print(f"  Geçen süre: {elapsed:.1f} dakika")
-    print(f"  Bulunan müsait username: {len(available_list)}")
+    print(f"  Done! {checked_count} usernames checked.")
+    print(f"  Elapsed: {elapsed:.1f} minutes")
+    print(f"  Available usernames found: {len(available_list)}")
     if available_list:
-        print(f"\n  ✅ Müsait olanlar:")
+        print(f"\n  ✅ Available:")
         for u in available_list:
             print(f"     - {u}")
     print(f"{'='*55}{RESET}")
@@ -303,7 +302,7 @@ def main():
     if available_list:
         with open("available.txt", "w", encoding="utf-8") as f:
             f.write("\n".join(available_list))
-        print(f"\n💾 'available.txt' dosyasına kaydedildi.")
+        print(f"\n💾 Saved to 'available.txt'.")
 
 
 if __name__ == "__main__":
